@@ -50,6 +50,26 @@ export async function listPendingReports(): Promise<PendingResult> {
   return { ok: true, items: data };
 }
 
+// 신고가 몰려 있는지 센다: 대기 중인 신고 수와, 최근 몇 분 동안 들어온 신고 수.
+// 누군가 신고 접수를 반복해서 불러 AI 요금과 대기 목록을 불리는 것을 막는 데 쓴다.
+// 세지 못하면 null을 돌려준다.
+export async function countReportLoad(recentMinutes: number): Promise<{ pending: number; recent: number } | null> {
+  const supabase = getSupabase();
+  if (!supabase) return null;
+
+  const since = new Date(Date.now() - recentMinutes * 60 * 1000).toISOString();
+  const [pending, recent] = await Promise.all([
+    supabase.from("reports").select("id", { count: "exact", head: true }).eq("status", "대기"),
+    supabase.from("reports").select("id", { count: "exact", head: true }).gte("reported_at", since),
+  ]);
+
+  if (pending.error || recent.error) {
+    console.error("신고 건수를 세지 못했습니다:", (pending.error ?? recent.error)?.message);
+    return null;
+  }
+  return { pending: pending.count ?? 0, recent: recent.count ?? 0 };
+}
+
 // 저장 결과. 실패하면 화면에 보여 줄 안내 문구를 담는다.
 export type SaveResult = { ok: true; id: number } | { ok: false; message: string };
 

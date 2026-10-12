@@ -1,4 +1,5 @@
 import { approveReport, rejectReport } from "@/lib/approval";
+import { crossSiteResponse, isCrossSite } from "@/lib/input-check";
 import { isAdmin } from "@/lib/session";
 
 // 신고 승인·반려 서버 경로 (DESIGN.md 2.3)
@@ -15,6 +16,9 @@ function asText(value: unknown): string {
 }
 
 export async function POST(request: Request): Promise<Response> {
+  // 다른 사이트의 화면에서 몰래 보낸 요청은 받지 않는다.
+  if (isCrossSite(request)) return crossSiteResponse();
+
   // 로그인한 관리자만 승인·반려할 수 있다.
   if (!(await isAdmin())) {
     return Response.json({ ok: false, message: "관리자 로그인이 필요합니다." }, { status: 401 });

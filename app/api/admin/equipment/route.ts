@@ -4,6 +4,7 @@ import {
   readEquipmentInput,
   updateEquipment,
 } from "@/lib/equipment-admin";
+import { crossSiteResponse, isCrossSite } from "@/lib/input-check";
 import { isAdmin } from "@/lib/session";
 
 // 장비 직접 관리 서버 경로: 입력·수정·삭제 (PRD must 3, DESIGN.md 2.6)
@@ -15,6 +16,9 @@ function badRequest(message: string): Response {
 }
 
 export async function POST(request: Request): Promise<Response> {
+  // 다른 사이트의 화면에서 몰래 보낸 요청은 받지 않는다.
+  if (isCrossSite(request)) return crossSiteResponse();
+
   // 로그인한 관리자만 장비를 직접 고칠 수 있다.
   if (!(await isAdmin())) {
     return Response.json({ ok: false, message: "관리자 로그인이 필요합니다." }, { status: 401 });
