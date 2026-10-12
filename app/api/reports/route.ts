@@ -1,8 +1,9 @@
+import { createHmac } from "node:crypto";
 import { organizeReport } from "@/lib/ai";
 import { listEquipment } from "@/lib/equipment";
 import { crossSiteResponse, findTextProblem, isCrossSite } from "@/lib/input-check";
 import { applyRules } from "@/lib/report-rules";
-import { countReportLoad, saveReport } from "@/lib/reports";
+import { claimReportSlot, saveReport, type ReportLimits } from "@/lib/reports";
 
 // 신고 접수 서버 경로 (DESIGN.md 2.2)
 // 신고 글을 AI로 정리하고, 규칙대로 검사한 뒤, "대기" 상태로 저장하고 정리 결과를 돌려준다.
@@ -20,9 +21,22 @@ const UNAVAILABLE_MESSAGE = "지금은 신고를 접수할 수 없습니다. 잠
 
 // 누군가 신고 접수를 반복해서 불러 AI 요금과 대기 목록을 불리는 것을 막는 한도.
 // 한도를 넘으면 AI를 부르지 않고 "잠시 후 다시"를 안내한다.
-const MAX_PENDING = 50; // 승인을 기다리는 신고가 이만큼 쌓이면 새 신고를 받지 않는다.
-const RECENT_MINUTES = 10;
-const MAX_RECENT = 30; // 최근 10분 동안 받는 신고 수
+const LIMITS: ReportLimits = {
+  minutes: 10, // 최근 10분을 본다.
+  maxPerRequester: 10, // 한 곳(같은 IP 주소)에서 10분 동안 보낼 수 있는 신고 수
+  maxRecent: 30, // 전체가 10분 동안 보낼 수 있는 신고 수
+  maxPending: 50, // 승인을 기다리는 신고가 이만큼 쌓이면 새 신고를 받지 않는다.
+};
+
+// 요청을 보낸 곳을 구분하는 값을 만든다. 한 곳에서 한도를 다 써 버리지 못하게 하는 데 쓴다.
+// IP 주소를 그대로 저장하지 않고, 되돌릴 수 없는 글자로 바꿔서 쓴다.
+// 배포 환경(Vercel)은 요청마다 보낸 곳의 주소를 x-forwarded-for에 넣어 준다.
+// 내 컴퓨터에서 돌릴 때처럼 이 값이 없으면 빈 글자를 돌려주고, 그때는 전체 한도만 적용된다.
+function requesterId(request: Request): string {
+  const address = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+  if (!address) return "";
+  return createHmac("sha256", process.env.SESSION_SECRET ?? "report-attempts").update(address).digest("hex");
+}
 
 // 글자 수를 센다. 이모지 같은 글자도 1글자로 센다.
 function countChars(text: string): number {
@@ -75,16 +89,25 @@ export async function POST(request: Request): Promise<Response> {
     return badRequest(problem);
   }
 
-  // 2) 신고가 몰려 있으면 받지 않는다. 동시에 데이터 저장소에서 장비 목록을 읽는다.
-  const [load, equipment] = await Promise.all([countReportLoad(RECENT_MINUTES), listEquipment()]);
-  if (!load || !equipment.ok) {
+  // 2) 접수 한도를 확인하고 시도를 기록한다. 동시에 데이터 저장소에서 장비 목록을 읽는다.
+  //    한도를 넘었으면 AI를 부르지 않는다.
+  const [slot, equipment] = await Promise.all([
+    claimReportSlot(requesterId(request), LIMITS),
+    listEquipment(),
+  ]);
+  if (slot === "error" || !equipment.ok) {
     // 로그인 없이 쓰는 화면이므로 자세한 원인은 서버 기록에만 남긴다.
     if (!equipment.ok) console.error("신고 접수 실패:", equipment.message);
     return failed(UNAVAILABLE_MESSAGE, 500);
   }
-  if (load.pending >= MAX_PENDING || load.recent >= MAX_RECENT) {
-    console.warn(`신고가 몰려 접수를 잠시 멈췄습니다: 대기 ${load.pending}건, 최근 ${RECENT_MINUTES}분 ${load.recent}건`);
-    return failed("지금은 접수된 신고가 많습니다. 잠시 후 다시 보내 주세요.", 429);
+  if (slot !== "ok") {
+    console.warn(`신고 접수를 받지 않았습니다: ${slot}`);
+    return failed(
+      slot === "too_many"
+        ? `신고를 너무 자주 보냈습니다. ${LIMITS.minutes}분쯤 뒤에 다시 보내 주세요.`
+        : "지금은 접수된 신고가 많습니다. 잠시 후 다시 보내 주세요.",
+      429,
+    );
   }
 
   // 3) 신고 글과 장비 목록을 AI에 보내 정리한다. 남은 시간만큼만 기다린다.

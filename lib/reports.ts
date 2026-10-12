@@ -50,24 +50,40 @@ export async function listPendingReports(): Promise<PendingResult> {
   return { ok: true, items: data };
 }
 
-// 신고가 몰려 있는지 센다: 대기 중인 신고 수와, 최근 몇 분 동안 들어온 신고 수.
-// 누군가 신고 접수를 반복해서 불러 AI 요금과 대기 목록을 불리는 것을 막는 데 쓴다.
-// 세지 못하면 null을 돌려준다.
-export async function countReportLoad(recentMinutes: number): Promise<{ pending: number; recent: number } | null> {
+// 신고 접수 한도
+export type ReportLimits = {
+  minutes: number; // 최근 몇 분을 볼지
+  maxPerRequester: number; // 그 시간 동안 한 곳에서 보낼 수 있는 수
+  maxRecent: number; // 그 시간 동안 전체가 보낼 수 있는 수
+  maxPending: number; // 대기 신고가 이만큼 쌓이면 받지 않음
+};
+
+// 접수 자리를 잡은 결과
+//   ok: 접수해도 됨 / too_many: 같은 곳에서 너무 많이 보냄 / busy: 전체 신고가 너무 많음
+//   backlog: 대기 신고가 너무 많이 쌓임 / error: 확인하지 못함
+export type SlotResult = "ok" | "too_many" | "busy" | "backlog" | "error";
+
+// 신고를 받아도 되는지 확인하고, 되면 시도를 기록한다. (DESIGN.md 2.2)
+// AI를 부르기 전에 부른다. 확인과 기록은 데이터 저장소의 claim_report_slot 함수가 한 묶음으로 처리하므로,
+// 같은 순간에 몰려온 요청도 한도를 넘지 못하고, AI가 실패해 저장되지 않은 호출도 센다.
+// 확인하지 못하면 "error"를 돌려주며, 이때는 신고를 받지 않는다.
+export async function claimReportSlot(requester: string, limits: ReportLimits): Promise<SlotResult> {
   const supabase = getSupabase();
-  if (!supabase) return null;
+  if (!supabase) return "error";
 
-  const since = new Date(Date.now() - recentMinutes * 60 * 1000).toISOString();
-  const [pending, recent] = await Promise.all([
-    supabase.from("reports").select("id", { count: "exact", head: true }).eq("status", "대기"),
-    supabase.from("reports").select("id", { count: "exact", head: true }).gte("reported_at", since),
-  ]);
+  const { data, error } = await supabase.rpc("claim_report_slot", {
+    p_requester: requester,
+    p_minutes: limits.minutes,
+    p_max_per_requester: limits.maxPerRequester,
+    p_max_recent: limits.maxRecent,
+    p_max_pending: limits.maxPending,
+  });
 
-  if (pending.error || recent.error) {
-    console.error("신고 건수를 세지 못했습니다:", (pending.error ?? recent.error)?.message);
-    return null;
+  if (error) {
+    console.error("신고 접수 한도를 확인하지 못했습니다:", error.message);
+    return "error";
   }
-  return { pending: pending.count ?? 0, recent: recent.count ?? 0 };
+  return data === "ok" || data === "too_many" || data === "busy" || data === "backlog" ? data : "error";
 }
 
 // 저장 결과. 실패하면 화면에 보여 줄 안내 문구를 담는다.
