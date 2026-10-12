@@ -1,3 +1,4 @@
+import "server-only"; // 화면(브라우저) 쪽 코드에서 실수로 불러 쓰면 빌드가 막아 준다.
 import OpenAI from "openai";
 import type { Equipment } from "@/lib/equipment";
 import { CHANGE_TYPES, type OrganizedReport } from "@/lib/report-rules";
@@ -7,6 +8,10 @@ import { CHANGE_TYPES, type OrganizedReport } from "@/lib/report-rules";
 
 // 신고 글 정리에 쓰는 AI 모델 (DESIGN.md 3.2)
 const MODEL = "gpt-4.1-mini";
+
+// AI가 쓸 수 있는 답의 최대 길이. 정리 결과 5개 항목에는 넉넉하고,
+// 누군가 긴 답을 유도해 요금을 불리는 것은 막는다.
+const MAX_ANSWER_TOKENS = 300;
 
 // AI의 답은 아직 검사 전이다. 반드시 lib/report-rules.ts의 applyRules로 검사한 뒤에 쓴다.
 
@@ -85,7 +90,9 @@ export async function organizeReport(
 ): Promise<OrganizeResult> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
-    return { ok: false, message: "AI 서비스 키가 없습니다. .env 파일에 OPENAI_API_KEY를 넣어 주세요." };
+    // 로그인 없이 쓰는 화면으로 돌아가는 안내이므로, 자세한 원인은 서버 기록에만 남긴다.
+    console.error("AI 서비스 키가 없습니다. .env 파일에 OPENAI_API_KEY를 넣어 주세요.");
+    return { ok: false, message: "지금은 신고를 접수할 수 없습니다. 잠시 후 다시 시도해 주세요." };
   }
 
   const client = new OpenAI({ apiKey });
@@ -95,6 +102,7 @@ export async function organizeReport(
       {
         model: MODEL,
         temperature: 0, // 같은 글에는 늘 같은 답이 나오게 한다.
+        max_completion_tokens: MAX_ANSWER_TOKENS,
         response_format: ANSWER_FORMAT,
         messages: [
           { role: "system", content: INSTRUCTIONS },

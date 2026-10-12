@@ -1,7 +1,8 @@
 import { organizeReport } from "@/lib/ai";
 import { listEquipment } from "@/lib/equipment";
+import { crossSiteResponse, findTextProblem, isCrossSite } from "@/lib/input-check";
 import { applyRules } from "@/lib/report-rules";
-import { saveReport } from "@/lib/reports";
+import { countReportLoad, saveReport } from "@/lib/reports";
 
 // 신고 접수 서버 경로 (DESIGN.md 2.2)
 // 신고 글을 AI로 정리하고, 규칙대로 검사한 뒤, "대기" 상태로 저장하고 정리 결과를 돌려준다.
@@ -15,6 +16,13 @@ const MAX_NAME_LENGTH = 20; // 신고자 이름 길이 제한
 const ORGANIZE_DEADLINE_MS = 4500;
 
 const TIMEOUT_MESSAGE = "AI 정리에 시간이 너무 오래 걸렸습니다. 다시 시도해 주세요.";
+const UNAVAILABLE_MESSAGE = "지금은 신고를 접수할 수 없습니다. 잠시 후 다시 시도해 주세요.";
+
+// 누군가 신고 접수를 반복해서 불러 AI 요금과 대기 목록을 불리는 것을 막는 한도.
+// 한도를 넘으면 AI를 부르지 않고 "잠시 후 다시"를 안내한다.
+const MAX_PENDING = 50; // 승인을 기다리는 신고가 이만큼 쌓이면 새 신고를 받지 않는다.
+const RECENT_MINUTES = 10;
+const MAX_RECENT = 30; // 최근 10분 동안 받는 신고 수
 
 // 글자 수를 센다. 이모지 같은 글자도 1글자로 센다.
 function countChars(text: string): number {
@@ -33,6 +41,9 @@ function failed(message: string, status: number): Response {
 
 export async function POST(request: Request): Promise<Response> {
   const startedAt = Date.now();
+
+  // 다른 사이트의 화면에서 몰래 보낸 요청은 받지 않는다.
+  if (isCrossSite(request)) return crossSiteResponse();
 
   // 1) 보낸 내용을 읽고 확인한다.
   let body: unknown;
@@ -58,10 +69,22 @@ export async function POST(request: Request): Promise<Response> {
   const reporter = input.reporter.trim();
   const text = input.text.trim();
 
-  // 2) 데이터 저장소에서 장비 목록을 읽는다.
-  const equipment = await listEquipment();
-  if (!equipment.ok) {
-    return failed(equipment.message, 500);
+  // 개인정보나 쓸 수 없는 글자가 있으면 저장하거나 AI에 보내기 전에 거절한다.
+  const problem = findTextProblem(reporter) ?? findTextProblem(text);
+  if (problem) {
+    return badRequest(problem);
+  }
+
+  // 2) 신고가 몰려 있으면 받지 않는다. 동시에 데이터 저장소에서 장비 목록을 읽는다.
+  const [load, equipment] = await Promise.all([countReportLoad(RECENT_MINUTES), listEquipment()]);
+  if (!load || !equipment.ok) {
+    // 로그인 없이 쓰는 화면이므로 자세한 원인은 서버 기록에만 남긴다.
+    if (!equipment.ok) console.error("신고 접수 실패:", equipment.message);
+    return failed(UNAVAILABLE_MESSAGE, 500);
+  }
+  if (load.pending >= MAX_PENDING || load.recent >= MAX_RECENT) {
+    console.warn(`신고가 몰려 접수를 잠시 멈췄습니다: 대기 ${load.pending}건, 최근 ${RECENT_MINUTES}분 ${load.recent}건`);
+    return failed("지금은 접수된 신고가 많습니다. 잠시 후 다시 보내 주세요.", 429);
   }
 
   // 3) 신고 글과 장비 목록을 AI에 보내 정리한다. 남은 시간만큼만 기다린다.

@@ -1,3 +1,4 @@
+import "server-only"; // 화면(브라우저) 쪽 코드에서 실수로 불러 쓰면 빌드가 막아 준다.
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 // 데이터 저장소(Supabase) 연결 도구를 만든다.
